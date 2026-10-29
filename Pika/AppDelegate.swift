@@ -109,9 +109,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         showPikaIfConfigured()
         registerGlobalKeyMonitor()
 
-        // Refresh the colour-name list from color.pizza (catalogue + selected list) and cache
-        // it; the eyedroppers rebuild via `.colorNamesUpdated`. Best-effort — falls back to
-        // the bundled default offline.
+        // Refresh the selected name source, retaining its saved colours offline.
+        // Imported files stay local; the eyedroppers rebuild via `.colorNamesUpdated`.
         ColorNamesManager.shared.updateOnLaunch()
     }
 

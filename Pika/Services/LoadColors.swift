@@ -1,7 +1,7 @@
 import Cocoa
 import Defaults
 
-struct ColorName: Decodable {
+struct ColorName: Codable {
     public var name: String
     public var hex: String
     public var color: NSColor {
@@ -9,7 +9,7 @@ struct ColorName: Decodable {
     }
 }
 
-struct ResponseData: Decodable {
+struct ResponseData: Codable {
     var colors: [ColorName]
 }
 
@@ -42,13 +42,14 @@ func loadColors() -> [ColorName]? {
     return nil
 }
 
-/// Owns colour-name data sourced from the color.pizza API, with an offline fallback.
+/// Owns colour-name data from color.pizza or an imported custom file/URL.
 ///
 /// - A snapshot list is bundled with the app (refreshed before each release), so names
 ///   always work offline.
 /// - On launch the currently-selected list is refreshed from the network and cached on disk.
 /// - Settings and the splash let the user pick any list from `/v1/lists/`; if the chosen
 ///   list is no longer offered by the API, we fall back to `default`.
+/// - Custom names use a separate snapshot; API catalogue changes never replace it.
 ///
 /// Reloads are broadcast via `.colorNamesUpdated` so the eyedroppers rebuild their lookup.
 final class ColorNamesManager: ObservableObject {
@@ -68,7 +69,15 @@ final class ColorNamesManager: ObservableObject {
     /// in the picker's tooltip so an offline / API problem is visible rather than silent.
     @Published private(set) var lastErrorMessage: String?
 
-    private let session = URLSession.shared
+    @Published private(set) var customList: CustomColorNameList?
+    @Published private(set) var isLoadingCustom = false
+
+    private let customStore: CustomColorNamesStore
+    private let customColorsLock = NSLock()
+    private var customColors: [ColorName] = []
+    private let session: URLSession
+    private var customLoadID: UUID?
+    private var customTask: URLSessionDataTask?
     private let apiBase = "https://api.color.pizza/v1"
 
     /// How often to re-check the API while the app keeps running.
@@ -81,11 +90,16 @@ final class ColorNamesManager: ObservableObject {
     /// Count of in-flight requests, so overlapping fetches keep `isFetching` accurate.
     private var inFlight = 0
 
-    private init() {}
+    init(session: URLSession = .shared, customStore: CustomColorNamesStore = .standard) {
+        self.session = session
+        self.customStore = customStore
+        customList = customStore.load()
+        customColors = customList?.colors ?? []
+    }
 
     /// A human-readable summary of the current refresh state, for the picker's tooltip.
     var statusDescription: String {
-        if isFetching { return PikaText.textColorListStatusChecking }
+        if isFetching || isLoadingCustom { return PikaText.textColorListStatusChecking }
         if let lastErrorMessage { return lastErrorMessage }
         if let lastUpdated {
             return String(format: PikaText.textColorListStatusUpdatedFormat,
@@ -99,6 +113,12 @@ final class ColorNamesManager: ObservableObject {
     /// The colour names for the currently-selected list: the on-disk cache if present,
     /// otherwise the bundled `default` list.
     func currentColorNames() -> [ColorName] {
+        // Eyedroppers call this on background queues while imports publish on the main queue.
+        if Defaults[.useCustomColorNames] {
+            customColorsLock.lock()
+            defer { customColorsLock.unlock() }
+            return customColors
+        }
         let key = Defaults[.colorNameList]
         if let url = Self.cacheURL(for: key),
            let data = try? Data(contentsOf: url),
@@ -126,9 +146,15 @@ final class ColorNamesManager: ObservableObject {
     /// `default` if the chosen list is no longer offered. Safe to call repeatedly.
     func refreshAll() {
         lastRefreshAttempt = Date()
+        if Defaults[.useCustomColorNames] {
+            refreshCustomList()
+            return
+        }
+        let selectedKey = Defaults[.colorNameList]
         fetchLists { [weak self] infos, availableKeys in
             guard let self else { return }
             if !infos.isEmpty { self.availableLists = infos }
+            guard !Defaults[.useCustomColorNames], Defaults[.colorNameList] == selectedKey else { return }
 
             // Fall back to `default` if the chosen list is no longer available.
             var key = Defaults[.colorNameList]
@@ -175,8 +201,11 @@ final class ColorNamesManager: ObservableObject {
     /// Switches the active list: reflects the change immediately from cache / bundle, then
     /// fetches the latest colours for the newly-chosen list in the background.
     func selectList(_ key: String) {
-        guard key != Defaults[.colorNameList] else { return }
+        guard key != Defaults[.colorNameList] || Defaults[.useCustomColorNames] || isLoadingCustom else { return }
+        cancelCustomLoad()
+        Defaults[.useCustomColorNames] = false
         Defaults[.colorNameList] = key
+        lastErrorMessage = nil
         refreshLastUpdated()
         NotificationCenter.default.post(name: .colorNamesUpdated, object: nil)
         refreshColors(for: key)
@@ -185,6 +214,7 @@ final class ColorNamesManager: ObservableObject {
     private func refreshColors(for key: String) {
         fetchColors(for: key) { [weak self] result in
             guard let self else { return }
+            guard !Defaults[.useCustomColorNames], Defaults[.colorNameList] == key else { return }
             switch result {
             case .success:
                 self.lastErrorMessage = nil
@@ -200,7 +230,85 @@ final class ColorNamesManager: ObservableObject {
 
     /// Recomputes `lastUpdated` from the active list's cache file modification date.
     private func refreshLastUpdated() {
-        lastUpdated = Self.cacheModificationDate(for: Defaults[.colorNameList])
+        lastUpdated = Defaults[.useCustomColorNames]
+            ? customList?.updatedAt : Self.cacheModificationDate(for: Defaults[.colorNameList])
+    }
+
+    // MARK: - Custom files and URLs
+
+    func selectCustomList() {
+        guard customList != nil else { return }
+        cancelCustomLoad()
+        Defaults[.useCustomColorNames] = true
+        lastErrorMessage = nil
+        refreshLastUpdated()
+        NotificationCenter.default.post(name: .colorNamesUpdated, object: nil)
+        refreshCustomList()
+    }
+
+    func importCustomFile(_ url: URL) {
+        let loadID = beginCustomLoad()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result { try CustomColorNamesStore.importFile(url) }
+            DispatchQueue.main.async { self?.finishCustomLoad(result, id: loadID) }
+        }
+    }
+
+    func loadCustomURL(_ value: String) {
+        let loadID = beginCustomLoad()
+        do {
+            let url = try CustomColorNamesStore.remoteURL(value)
+            customTask = CustomColorNamesStore.download(url, session: session) { [weak self] result in
+                self?.finishCustomLoad(result, id: loadID)
+            }
+        } catch {
+            finishCustomLoad(.failure(error), id: loadID)
+        }
+    }
+
+    private func refreshCustomList() {
+        guard !isLoadingCustom else { return }
+        guard let customList else {
+            lastErrorMessage = String(localized: "Your custom colour list is unavailable. Import it again or choose a color.pizza list.")
+            return
+        }
+        if let url = customList.sourceURL { loadCustomURL(url.absoluteString) }
+    }
+
+    private func beginCustomLoad() -> UUID {
+        cancelCustomLoad()
+        let id = UUID()
+        customLoadID = id
+        isLoadingCustom = true
+        lastErrorMessage = nil
+        return id
+    }
+
+    private func cancelCustomLoad() {
+        customLoadID = nil
+        customTask?.cancel()
+        customTask = nil
+        isLoadingCustom = false
+    }
+
+    private func finishCustomLoad(_ result: Result<CustomColorNameList, Error>, id: UUID) {
+        // A late URL/file result must not undo a newer selection or overwrite its snapshot.
+        guard customLoadID == id else { return }
+        defer { cancelCustomLoad() }
+        do {
+            let list = try result.get()
+            try customStore.save(list)
+            customColorsLock.lock()
+            customColors = list.colors
+            customColorsLock.unlock()
+            customList = list
+            Defaults[.useCustomColorNames] = true
+            lastErrorMessage = nil
+            refreshLastUpdated()
+            NotificationCenter.default.post(name: .colorNamesUpdated, object: nil)
+        } catch {
+            lastErrorMessage = error.localizedDescription
+        }
     }
 
     // MARK: - Fetch-state tracking

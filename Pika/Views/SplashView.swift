@@ -192,6 +192,7 @@ struct ColorListPickerView: View {
 
     @ObservedObject private var manager = ColorNamesManager.shared
     @Default(.colorNameList) private var colorNameList
+    @Default(.useCustomColorNames) private var useCustomColorNames
 
     private var options: [ColorListInfo] {
         var infos = manager.availableLists
@@ -207,7 +208,8 @@ struct ColorListPickerView: View {
     }
 
     private var selectedTitle: String {
-        options.first { $0.key == colorNameList }?.title ?? colorNameList
+        if useCustomColorNames { return manager.customList?.title ?? String(localized: "Custom colour names") }
+        return options.first { $0.key == colorNameList }?.title ?? colorNameList
     }
 
     var body: some View {
@@ -217,7 +219,7 @@ struct ColorListPickerView: View {
             HStack(alignment: .top, spacing: 12.0) {
                 VStack(alignment: .leading, spacing: 2.0) {
                     Text(PikaText.textColorListTitle).font(titleFont)
-                    Text(PikaText.textColorListSubtitle)
+                    Text(useCustomColorNames ? String(localized: "Names from your custom colour list.") : PikaText.textColorListSubtitle)
                         .font(subtitleFont)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -227,7 +229,7 @@ struct ColorListPickerView: View {
                 // spinner then sits at the trailing edge.
                 .frame(maxWidth: .infinity, alignment: .leading)
                 // Show a spinner while the catalogue / colours refresh so a fetch isn't silent.
-                if manager.isFetching {
+                if manager.isFetching || manager.isLoadingCustom {
                     ProgressView()
                         .progressViewStyle(.circular)
                         .controlSize(.small)
@@ -240,11 +242,17 @@ struct ColorListPickerView: View {
             // rounded label fills the column and matches the picker-comparison block above.
             Menu {
                 Picker("", selection: Binding(
-                    get: { colorNameList },
-                    set: { ColorNamesManager.shared.selectList($0) }
+                    get: { useCustomColorNames ? "_custom" : colorNameList },
+                    set: { key in
+                        if key == "_custom" { manager.selectCustomList() } else { manager.selectList(key) }
+                    }
                 )) {
                     ForEach(options) { info in
                         Text(info.title).tag(info.key)
+                    }
+                    if let customList = manager.customList {
+                        Divider()
+                        Text(customList.title).tag("_custom")
                     }
                 }
                 .labelsHidden()
@@ -276,6 +284,8 @@ struct ColorListPickerView: View {
             // default bordered menu button, which hugged its content and ignored the fill.
             .buttonStyle(.plain)
             .menuIndicator(.hidden)
+
+            CustomColorNamesControls()
         }
         // Keep the whole block full width so its children lay out against a definite width.
         .frame(maxWidth: .infinity, alignment: .leading)
