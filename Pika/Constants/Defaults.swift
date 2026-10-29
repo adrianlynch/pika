@@ -108,6 +108,7 @@ extension Defaults.Keys {
     // The colour-name list to use, keyed to color.pizza's `/v1/lists/`. `default` is the
     // list bundled at build time as the offline fallback.
     static let colorNameList = Key<String>("colorNameList", default: "default")
+    static let useCustomColorNames = Key<Bool>("useCustomColorNames", default: false)
     // When false, the splash is shown on launch. The splash's pre-selected "Don't show
     // this again" checkbox sets this to true on dismissal.
     static let hideSplashOnLaunch = Key<Bool>("hideSplashOnLaunch", default: false)

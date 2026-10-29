@@ -61,6 +61,37 @@ That’s where Pika comes in. Pick a foreground and background from anywhere on 
 
 Learn more about [WCAG contrast](https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html) and [APCA](https://git.apcacontrast.com/documentation/APCA_in_a_Nutshell).
 
+## Custom colour names
+
+In **Settings → Colour names**, choose **Import JSON…** to import a local file, or
+**Load URL…** to load a list from an HTTPS URL. The saved custom list also appears
+in the list menu, so you can switch between it and color.pizza's lists.
+
+Use the same JSON format as color.pizza:
+
+```json
+{
+  "colors": [
+    { "name": "Canvas", "hex": "#FFFFFF" },
+    { "name": "Ink", "hex": "#202020" }
+  ]
+}
+```
+
+- `colors` must be a non-empty array. Each entry needs a non-empty `name` and an
+  opaque sRGB `hex` value in `#RRGGBB` format (upper- or lowercase).
+- Additional JSON properties are ignored. Lists can contain up to 50,000 colours
+  and must be no larger than 5 MiB. If multiple names share a colour, the first wins.
+- URL lists refresh on launch, every six hours, and when the app becomes active
+  (at most once every 30 minutes). **Refresh** checks immediately. Serve UTF-8 JSON,
+  ideally with `Content-Type: application/json`; no CORS headers are needed.
+  Authenticated endpoints and custom request headers are not supported.
+- A valid list is saved locally. Failed downloads or invalid JSON retain the
+  previous list. Imported files are copied, so they still work after the original
+  file moves; import again to apply edits. Files are not watched for changes.
+- Naming uses Pika's existing nearest-colour match. A name does not prove an exact
+  design-token match, and sampling cannot distinguish aliases with identical colours.
+
 ## Keyboard Shortcuts
 
 Most shortcuts need Pika in front. Show/hide Pika and Pick pair (<kbd>⌥ ⌘ D</kbd>) work from any app; set them in Settings → Global Shortcut.
